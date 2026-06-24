@@ -1,0 +1,103 @@
+To truly master the get command, you have to break a bad habit right now: stop typing out the full names of resources. In a timed exam, typing kubectl get persistentvolumeclaims three times will cost you 45 seconds of your life and invite three syntax errors. You must memorize the CLI Shortnames.
+
+Here is your complete resource cheat-sheet, divided into the 4 Operational Tiers, followed by the tactical add-on flags.
+
+PART 1: The Master Resource Directory
+Tier 1: Workloads (The Compute)
+po (Pods) — The raw container cages.
+
+deploy (Deployments) — The manager that keeps stateless Pods alive.
+
+rs (ReplicaSets) — The silent math engine managed by the Deployment.
+
+sts (StatefulSets) — The strict manager for numbered, disk-locking Pods (Databases).
+
+ds (DaemonSets) — The agent that forces 1 Pod onto every single Node.
+
+cj (CronJobs) — The clock that spawns a Job on a schedule.
+
+jobs (no shortname) — A run-to-completion task.
+
+Tier 2: Networking (The Pipes)
+svc (Services) — The internal, stable IP Load Balancers.
+
+ing (Ingress) — The Layer 7 HTTP/DNS traffic router.
+
+ep (Endpoints) — The live, auto-updating list of Pod IPs glued to a Service.
+
+netpol (NetworkPolicies) — The internal pod-to-pod firewall rules.
+
+Tier 3: Storage & Config (The Payload)
+cm (ConfigMaps) — Non-secret configuration files/variables.
+
+secrets (no shortname) — Base64-encoded sensitive data.
+
+pvc (PersistentVolumeClaims) — The "ticket" a Pod holds to request disk space.
+
+pv (PersistentVolumes) — The actual physical slice of hard drive storage.
+
+sc (StorageClasses) — The automated hard-drive provisioner (e.g., standard vs fast-nvme).
+
+Tier 4: Infrastructure (The House)
+no (Nodes) — Your physical or virtual worker machines.
+
+ns (Namespaces) — The virtual cluster cluster-rooms.
+
+sa (ServiceAccounts) — The "User ID" a Pod uses to talk to the K8s API.
+
+💡 THE EXAM "GOD MODE" COMMAND: > If you forget a shortname during the test, do not panic. Type:
+kubectl api-resources
+It will instantly print a 3-column table on your screen listing every single object the cluster knows, its exact API group, and its official Shortname.
+
+PART 2: The Add-On Flags (The Modifiers)
+When an exam question asks you to solve a puzzle, standard kubectl get pods will almost never give you enough text to answer it. You use these add-ons to change the camera angle.
+
+1. -o wide (The "Reveal Location" flag)
+The Syntax: kubectl get pods -o wide
+
+Why you use it: Standard get pods just tells you if the pod is running. Adding -o wide forces Kubernetes to unhide two hidden data columns: The Pod's internal IP address, and which physical worker Node it got dropped onto. * Exam Scenario: "Verify that Pod web-A and Pod web-B did not get scheduled onto the same physical node."
+
+2. --show-labels (The "Sticky Note" flag)
+The Syntax: kubectl get deploy --show-labels
+
+Why you use it: Kubernetes operates entirely on label-matching. Standard get hides them to keep the screen clean. This forces the right-hand column to display app=nginx,tier=frontend.
+
+Exam Scenario: A Service refuses to send traffic to your Deployment. You run this to check if the Deployment's sticky note actually says app=nginx or if you accidentally typed app=ngin-x.
+
+3. -l <key>=<value> (The "Laser Filter" flag)
+The Syntax: kubectl get pods -l tier=backend
+
+Why you use it: If you type get pods in a busy enterprise namespace, 85 pods will blow past your screen. This tells the Kube-API: "Look at all 85 pods, throw 82 of them in the garbage, and only show me the 3 stamped with the label tier=backend."
+
+4. -A (The "Global Search" flag)
+The Syntax: kubectl get svc -A
+
+Why you use it: Stands for --all-namespaces. If a prompt says "Find the broken service called 'auth-gateway'", and you type kubectl get svc and it comes back blank, it means the proctors hid it inside a non-default room. -A checks all 14 rooms in the house simultaneously.
+
+5. -o yaml (The "DNA Export" flag)
+The Syntax: kubectl get secret db-pass -o yaml
+
+Why you use it: This takes the object sitting in the cluster's live RAM and converts it back into raw declarative YAML code on your screen.
+
+Exam Scenario: You need to make a duplicate of an existing, complicated Deployment. You run kubectl get deploy complex-app -o yaml > new-app.yaml, open the file, change the name to new-app, and hit apply. You just saved 15 minutes of typing.
+
+6. -w (The "Live Ticker" flag)
+The Syntax: kubectl get pods -l app=database -w
+
+Why you use it: Stands for --watch. When you scale a StatefulSet from 1 to 4, do not sit there hitting Up-Arrow -> Enter -> Up-Arrow -> Enter like a caveman to see if they booted up. Attach -w. The command prompt will freeze, and it will spit out a new line of text automatically the exact microsecond a pod shifts from Pending -> Running.
+
+7. --sort-by=<JSONPath> (The "Sniper" flag)
+The Syntax: kubectl get pods --sort-by='.metadata.creationTimestamp'
+
+Why you use it: * Exam Scenario: The prompt says: "There are 20 pods running in the namespace. Find the absolute oldest pod and delete it." Doing that by eye is impossible. Sorting by creation timestamp puts the oldest pod on line 1; you highlight its name and kill it.
+
+👑 The "Proctor's Nightmare" Bonus combo:
+Eventually, an exam will give you this sadistic question:
+
+"Write a clean text file to /opt/course/pod-list.txt containing ONLY the names of the pods in the default namespace and their IP addresses, separated by a space. No table headers."
+
+If you try to copy-paste that out of a normal terminal, you will fail the syntax checker. You bypass it using Custom Columns:
+
+Bash
+kubectl get pods -o custom-columns=NAME:.metadata.name,IP:.status.podIP --no-headers > /opt/course/pod-list.txt
+Boom. Perfect two-column data, zero manual formatting.

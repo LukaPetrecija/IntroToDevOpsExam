@@ -1,0 +1,267 @@
+### =========================================================================
+### DOCUMENT 1: THE KITCHEN-SINK CONFIGMAP 
+### (Covers Q24: Volume mount & Q25: subPath mounting)
+### =========================================================================
+apiVersion: v1
+kind: ConfigMap
+metadata:
+  name: app-config
+data:
+  # Q24: When mounted as a standard volume, this key becomes a physical file called 'app.properties'
+  app.properties: |
+    environment=production
+    cache_ttl=3600
+  # Q25: We will target this specific key later using 'subPath'
+  special_key.txt: "Strictly isolated string data"
+
+---
+### =========================================================================
+### DOCUMENT 2: THE MULTI-PURPOSE SECRET
+### (Covers Q26: Secret volumes, Q31: stringData base64 auto-encode, 
+###  Q35: envFrom secretRef, and Q37: Selective key mounting)
+### =========================================================================
+apiVersion: v1
+kind: Secret
+metadata:
+  name: vault-secret
+type: Opaque
+# [Certain] Q31: If you use 'stringData' instead of 'data', you can type plain text; 
+# the Kubernetes API server automatically Base64-encodes it behind the scenes upon saving!
+stringData:
+  DB_USERNAME: "master_admin"
+  DB_PASSWORD: "SuperComplexPassword123!"
+  api_token.key: "eyJhbGciOiJIUzI1NiIsInR5cCI6IkpXVCJ9..."
+
+---
+### =========================================================================
+### DOCUMENT 3: THE HEADLESS SERVICE 
+### (Covers Q16: StatefulSet DNS & Q41: Headless per-pod A-records)
+### =========================================================================
+apiVersion: v1
+kind: Service
+metadata:
+  name: redis-mesh
+spec:
+  # [Certain] Q41: Setting clusterIP to 'None' creates a "Headless Service". 
+  # It generates zero Load Balancers; querying this service returns the raw IPs of the backing pods.
+  clusterIP: None
+  selector:
+    app: redis-node
+  ports:
+    - port: 6379
+      targetPort: 6379
+
+---
+### =========================================================================
+### DOCUMENT 4: THE STATEFULSET (DATABASE TIER)
+### (Covers Q16: Stable DNS, Q21: Ordered scaling, Q27: PVC mapping, 
+###  Q28: InitContainers, and Q29: readOnly volume mounts)
+### =========================================================================
+apiVersion: apps/v1
+kind: StatefulSet
+metadata:
+  name: redis-store
+spec:
+  serviceName: "redis-mesh"       # Q16: MUST match Document 3's name to generate stable DNS records
+  replicas: 3
+  
+  # [Certain] Q21: 'OrderedReady' forces K8s to fully boot pod-0 to Ready before starting pod-1. 
+  # Conversely, Deployments boot all pods simultaneously in parallel.
+  podManagementPolicy: OrderedReady 
+  
+  selector:
+    matchLabels:
+      app: redis-node
+  template:
+    metadata:
+      labels:
+        app: redis-node
+    spec:
+      # Q28: INIT-CONTAINER. Runs to completion BEFORE the main Redis container is allowed to boot.
+      initContainers:
+        - name: schema-loader
+          image: busybox:1.36
+          command: ['sh', '-c', 'echo "Initializing DB storage..." > /data/init.log']
+          volumeMounts:
+            - name: redis-data-disk
+              mountPath: /data
+
+      containers:
+        - name: redis
+          image: redis:7.2
+          ports:
+            - containerPort: 6379
+          volumeMounts:
+            - name: redis-data-disk
+              mountPath: /data
+            
+            # Q29: READ-ONLY MOUNT. Proves writes to /etc/keys will be rejected by the OS kernel.
+            - name: secret-keys
+              mountPath: /etc/keys
+              readOnly: true
+      
+      volumes:
+        - name: secret-keys
+          secret:
+            secretName: vault-secret
+            # Q26 & Q34: Kubelet sets file permissions to 0420 (octal for 644) or 0400 for security.
+            defaultMode: 0400
+            
+            # Q37: SELECTIVE KEY MOUNT. Out of the 3 keys in Doc 2, grab ONLY 'api_token.key'
+            items:
+              - key: api_token.key
+                path: token.txt
+
+  # [Certain] Q27: VOLUME CLAIM TEMPLATE. Generates 1 distinct physical PVC per replica (redis-data-disk-0, etc).
+  # When you delete this StatefulSet, Kubernetes leaves the PVCs sitting on the hard drive to prevent data loss.
+  volumeClaimTemplates:
+    - metadata:
+        name: redis-data-disk
+      spec:
+        accessModes: [ "ReadWriteOnce" ]
+        resources:
+          requests:
+            storage: 2Gi
+
+---
+### =========================================================================
+### DOCUMENT 5: THE MEGA APPLICATION DEPLOYMENT
+### (Covers Q11-14: Selectors/Sidecars/NodeSelectors, Q22: Shared emptyDir, 
+###  Q25: subPath caveat, Q30: emptyDir sizeLimit, Q35: envFrom, 
+###  Q45: port vs targetPort, and Q50-52: The Probes Trifecta)
+### =========================================================================
+apiVersion: apps/v1
+kind: Deployment
+metadata:
+  name: frontend-app
+spec:
+  replicas: 2
+  selector:
+    matchLabels:
+      app: web-ui
+  template:
+    metadata:
+      labels:
+        app: web-ui
+    spec:
+      # Q14: NODE-SELECTOR. If no physical worker node possesses the label 'disktype=super-fast-nvme',
+      # the scheduler throws its hands up and leaves the pods stuck in a 'Pending' state forever.
+      nodeSelector:
+        disktype: super-fast-nvme
+
+      containers:
+        # ------------------- CONTAINER 1: THE MAIN APP -------------------
+        - name: web-server
+          image: nginx:1.25
+          ports:
+            - name: http-port       # Q14: Named port
+              containerPort: 80
+          
+          # Q35: ENV-FROM. Injects every single key inside 'vault-secret' as a standard Linux env var.
+          envFrom:
+            - secretRef:
+                name: vault-secret
+
+          # Q52: STARTUP PROBE. Gives heavy apps a warm-up grace period.
+          # Math justification: 12 retries * 10s period = a 120-second (2 minute) budget before killing it.
+          startupProbe:
+            httpGet:
+              path: /
+              port: http-port
+            failureThreshold: 12
+            periodSeconds: 10
+
+          # Q50: LIVENESS PROBE. Catches deadlocks. If it returns 500 internal error, Kubelet reboots the container.
+          livenessProbe:
+            httpGet:
+              path: /
+              port: http-port
+            periodSeconds: 5
+
+          # Q51: READINESS PROBE. The Traffic Cop. If this TCP ping fails, the pod's IP is yanked from the Service.
+          readinessProbe:
+            tcpSocket:
+              port: 80
+            periodSeconds: 3
+
+          volumeMounts:
+            - name: shared-scratchpad
+              mountPath: /var/log/nginx
+            
+            # Q25: SUB-PATH MOUNT. Mounts Special_key.txt as a file without deleting the rest of /etc/app!
+            # [Likely] Caveat: If someone edits ConfigMap Doc 1, Kubelet will NOT auto-update a subPath mount; requires a pod reboot.
+            - name: config-volume
+              mountPath: /etc/app/special.txt
+              subPath: special_key.txt
+
+        # ------------------- CONTAINER 2: THE SIDECAR (Q13 & Q22) -------------------
+        - name: log-shipper-sidecar
+          image: busybox:1.36
+          # Q22: Proves shared IPC/Storage. Main app writes logs to /var/log/nginx; sidecar reads the identical folder.
+          command: ['sh', '-c', 'tail -f /logs/access.log']
+          volumeMounts:
+            - name: shared-scratchpad
+              mountPath: /logs
+
+      volumes:
+        - name: shared-scratchpad
+          emptyDir:
+            # Q30: If the sidecar writes 501MB of logs into this folder, Kubelet executes an instant Pod Eviction.
+            sizeLimit: 500Mi
+        - name: config-volume
+          configMap:
+            name: app-config
+
+---
+### =========================================================================
+### DOCUMENT 6: THE NODE-AGENT DAEMONSET (Covers Q17)
+### =========================================================================
+apiVersion: apps/v1
+kind: DaemonSet
+metadata:
+  name: fluentd-logger
+spec:
+  # [Certain] Q17: Notice there is NO 'replicas: X' field in a DaemonSet. 
+  # The Kubelet automatically spawns exactly 1 Pod onto every available physical node in the cluster.
+  selector:
+    matchLabels:
+      app: log-collector
+  template:
+    metadata:
+      labels:
+        app: log-collector
+    spec:
+      containers:
+        - name: collector
+          image: busybox:1.36
+          command: ["sleep", "infinity"]
+
+---
+### =========================================================================
+### DOCUMENT 7: THE SCHEDULED CRONJOB (Covers Q18, Q19, Q20)
+### =========================================================================
+apiVersion: batch/v1
+kind: CronJob
+metadata:
+  name: hourly-batch-job
+spec:
+  schedule: "0 * * * *"
+  # [Certain] Q19: Setting suspend to 'true' tells the controller: "Keep this schedule saved, 
+  # but refuse to trigger any new Jobs until I switch this back to false."
+  suspend: false
+  jobTemplate:
+    spec:
+      # Q18: COMPLETIONS. The Pod must finish with an 'exit 0' code exactly twice to be marked Successful.
+      completions: 2
+      parallelism: 1
+      template:
+        spec:
+          restartPolicy: OnFailure   # Batch pods cannot use "Always"
+          containers:
+            - name: calculator
+              image: perl:5.34
+              command: ["perl", "-e", "print 'Task resolved successfully\n'"]
+
+
+
+kubectl create deployment web --image=nginx:1.25 --replicas=3 --dry-run=client -o yaml > my-exam.yaml
